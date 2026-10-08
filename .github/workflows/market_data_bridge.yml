@@ -1,0 +1,62 @@
+name: Market Data Bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feat/market-data-bridge
+    paths:
+      - market_data/request.json
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-data-bridge-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fetch-and-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: \${{ github.ref_name }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install market-data dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pandas>=2.0" "efinance>=0.5.5" "akshare>=1.12.0"
+
+      - name: Fetch market data and screen
+        run: |
+          python scripts/market_data_bridge.py \
+            --request market_data/request.json \
+            --output market_data/latest.json
+          python - <<'PY'
+          import json
+          p = json.load(open("market_data/latest.json", encoding="utf-8"))
+          print("generated_at:", p.get("generated_at"))
+          print("market_breadth:", p.get("market_breadth"))
+          print("top candidates:")
+          for x in p.get("candidates", [])[:10]:
+              print(x.get("code"), x.get("name"), x.get("score"), x.get("setup"))
+          PY
+
+      - name: Commit latest snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add market_data/latest.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: refresh market data snapshot [skip ci]"
+          git push
