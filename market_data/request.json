@@ -1,0 +1,22 @@
+{
+  "mode": "full",
+  "symbols": [
+    "600186"
+  ],
+  "history_days": 60,
+  "minute_period": 1,
+  "minute_start": "2026-10-08",
+  "minute_end": "2026-10-08",
+  "minute_rows": 500,
+  "include_boards": true,
+  "board_top_n": 8,
+  "top_n": 8,
+  "max_prefilter": 40,
+  "adjust": "qfq",
+  "filters": {
+    "exclude_bse": true,
+    "exclude_star": true,
+    "exclude_st": true
+  },
+  "requested_at": "2026-10-08T15:10:00+08:00"
+}
