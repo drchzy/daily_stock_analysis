@@ -117,6 +117,129 @@ def _normalize_minute(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+
+TDX_HOSTS = [
+    ("119.147.212.81", 7709),
+    ("112.74.214.43", 7727),
+    ("221.231.141.60", 7709),
+    ("101.227.73.20", 7709),
+    ("101.227.77.254", 7709),
+    ("14.215.128.18", 7709),
+    ("59.173.18.140", 7709),
+    ("180.153.39.51", 7709),
+]
+
+
+def _tdx_connect():
+    try:
+        from pytdx.hq import TdxHq_API
+    except Exception as e:
+        raise RuntimeError(f"pytdx unavailable: {e}")
+    last_error = None
+    for host, port in TDX_HOSTS:
+        api = TdxHq_API()
+        try:
+            if api.connect(host, port, time_out=3):
+                return api, f"{host}:{port}"
+        except Exception as e:
+            last_error = e
+        try:
+            api.disconnect()
+        except Exception:
+            pass
+    raise RuntimeError(f"unable to connect TDX servers: {last_error}")
+
+
+def _tdx_market(code: str) -> int:
+    return 1 if str(code).startswith(("60", "68")) else 0
+
+
+def _is_tdx_a_share(market: int, code: str) -> bool:
+    code = str(code).zfill(6)
+    if market == 1:
+        return code.startswith(("600", "601", "603", "605", "688", "689"))
+    return code.startswith(("000", "001", "002", "003", "300", "301"))
+
+
+def fetch_daily_tdx(code: str, days: int = 90) -> Tuple[pd.DataFrame, str]:
+    api, host = _tdx_connect()
+    try:
+        market = _tdx_market(code)
+        count = min(max(days + 30, 120), 800)
+        rows = api.get_security_bars(9, market, str(code).zfill(6), 0, count) or []
+        if not rows:
+            raise RuntimeError("TDX returned no daily bars")
+        df = pd.DataFrame(rows)
+        rename = {"datetime": "date", "vol": "volume"}
+        df = df.rename(columns=rename)
+        for col in ["open", "close", "high", "low", "volume", "amount"]:
+            if col in df:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        if "date" in df:
+            df["date"] = df["date"].astype(str)
+            df = df.sort_values("date")
+        return df.tail(days), f"pytdx:{host}"
+    finally:
+        try:
+            api.disconnect()
+        except Exception:
+            pass
+
+
+def fetch_realtime_market_tdx() -> Tuple[pd.DataFrame, str]:
+    api, host = _tdx_connect()
+    try:
+        securities = []
+        name_map = {}
+        for market in (0, 1):
+            count = int(api.get_security_count(market) or 0)
+            for start in range(0, count, 1000):
+                page = api.get_security_list(market, start) or []
+                if not page:
+                    break
+                for item in page:
+                    code = str(item.get("code", "")).zfill(6)
+                    name = str(item.get("name", "")).strip()
+                    if code and name and _is_tdx_a_share(market, code):
+                        securities.append((market, code))
+                        name_map[(market, code)] = name
+                if len(page) < 1000:
+                    break
+
+        rows = []
+        for i in range(0, len(securities), 80):
+            batch = securities[i:i + 80]
+            quotes = api.get_security_quotes(batch) or []
+            for q in quotes:
+                code = str(q.get("code", "")).zfill(6)
+                market = _tdx_market(code)
+                price = _num(q.get("price"))
+                pre_close = _num(q.get("last_close"))
+                pct = ((price / pre_close - 1) * 100) if price > 0 and pre_close > 0 else None
+                rows.append({
+                    "code": code,
+                    "name": name_map.get((market, code), ""),
+                    "price": price,
+                    "pct_change": pct,
+                    "open": _num(q.get("open")),
+                    "high": _num(q.get("high")),
+                    "low": _num(q.get("low")),
+                    "pre_close": pre_close,
+                    "volume": _num(q.get("vol")),
+                    "amount": _num(q.get("amount")),
+                    "turnover": None,
+                    "volume_ratio": None,
+                })
+        if not rows:
+            raise RuntimeError("TDX returned no realtime quotes")
+        return pd.DataFrame(rows), f"pytdx:{host}"
+    finally:
+        try:
+            api.disconnect()
+        except Exception:
+            pass
+
+
 def fetch_daily(code: str, days: int = 90, adjust: str = "qfq") -> Tuple[pd.DataFrame, str]:
     beg, end = _date_range(days)
     errors: List[str] = []
@@ -137,6 +260,12 @@ def fetch_daily(code: str, days: int = 90, adjust: str = "qfq") -> Tuple[pd.Data
                 return df.tail(days), "akshare"
         except Exception as e:
             errors.append(f"akshare:{e}")
+    try:
+        df, source = fetch_daily_tdx(code, days)
+        if not df.empty:
+            return df, source
+    except Exception as e:
+        errors.append(f"pytdx:{e}")
     raise RuntimeError("daily fetch failed: " + " | ".join(errors))
 
 
@@ -188,6 +317,12 @@ def fetch_realtime_market() -> Tuple[pd.DataFrame, str]:
                 return df.copy(), "akshare"
         except Exception as e:
             errors.append(f"akshare:{e}")
+    try:
+        df, source = fetch_realtime_market_tdx()
+        if not df.empty:
+            return df, source
+    except Exception as e:
+        errors.append(f"pytdx:{e}")
     raise RuntimeError("realtime market fetch failed: " + " | ".join(errors))
 
 
@@ -389,14 +524,19 @@ def screen_ultra_short(
     exclude_st: bool = True,
 ) -> List[Dict[str, Any]]:
     s = _spot_columns(spot_raw)
-    for c in ["code", "name", "price", "pct_change", "turnover", "amount"]:
+    for c in ["code", "name", "price", "pct_change", "amount"]:
         if c not in s.columns:
             raise RuntimeError(f"realtime data missing column: {c}")
+    if "turnover" not in s.columns:
+        s["turnover"] = float("nan")
+    if "volume_ratio" not in s.columns:
+        s["volume_ratio"] = float("nan")
 
     s = s[s.apply(lambda r: _eligible(r["code"], r["name"], exclude_bse, exclude_star, exclude_st), axis=1)]
     s = s.dropna(subset=["price", "pct_change", "amount"])
     s = s[(s["price"] >= 3) & (s["pct_change"] >= -2.5) & (s["pct_change"] <= 7.5) & (s["amount"] >= 8e7)]
-    s = s[(s["turnover"].fillna(0) >= 0.8) & (s["turnover"].fillna(0) <= 18)]
+    if s["turnover"].notna().any():
+        s = s[(s["turnover"].fillna(0) >= 0.8) & (s["turnover"].fillna(0) <= 18)]
 
     vr = s["volume_ratio"].fillna(1.0) if "volume_ratio" in s else pd.Series(1.0, index=s.index)
     s = s.assign(
