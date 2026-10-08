@@ -35,7 +35,7 @@ jobs:
       - name: Install market-data dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "pandas>=2.0" "efinance>=0.5.5" "akshare>=1.12.0"
+          pip install "pandas>=2.0" "efinance>=0.5.5" "akshare>=1.12.0" "pytdx>=1.72"
 
       - name: Fetch market data and screen
         run: |
