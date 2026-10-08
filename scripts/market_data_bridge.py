@@ -102,7 +102,7 @@ def _normalize_minute(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     rename = {
-        "日期": "time", "时间": "time", "开盘": "open", "收盘": "close",
+        "日期": "time", "时间": "time", "day": "time", "开盘": "open", "收盘": "close",
         "最高": "high", "最低": "low", "成交量": "volume", "成交额": "amount",
         "均价": "vwap", "涨跌幅": "pct_change", "涨跌额": "change",
         "振幅": "amplitude", "换手率": "turnover", "股票代码": "code",
@@ -259,7 +259,20 @@ def fetch_daily(code: str, days: int = 90, adjust: str = "qfq") -> Tuple[pd.Data
             if not df.empty:
                 return df.tail(days), "akshare"
         except Exception as e:
-            errors.append(f"akshare:{e}")
+            errors.append(f"akshare_em:{e}")
+        try:
+            prefix = "sh" if str(code).startswith("6") else "sz"
+            df = ak.stock_zh_a_daily(
+                symbol=prefix + str(code).zfill(6),
+                start_date=beg,
+                end_date=end,
+                adjust=adjust,
+            )
+            df = _normalize_daily(df)
+            if not df.empty:
+                return df.tail(days), "akshare_sina"
+        except Exception as e:
+            errors.append(f"akshare_sina:{e}")
     try:
         df, source = fetch_daily_tdx(code, days)
         if not df.empty:
@@ -297,7 +310,24 @@ def fetch_minute(code: str, period: int = 1, start: str = "", end: str = "", max
             if not df.empty:
                 return df.tail(max_rows), "akshare"
         except Exception as e:
-            errors.append(f"akshare:{e}")
+            errors.append(f"akshare_em:{e}")
+        try:
+            prefix = "sh" if str(code).startswith("6") else "sz"
+            df = ak.stock_zh_a_minute(
+                symbol=prefix + str(code).zfill(6),
+                period=str(period),
+                adjust="",
+            )
+            df = _normalize_minute(df)
+            if not df.empty and "time" in df.columns:
+                ts = pd.to_datetime(df["time"], errors="coerce")
+                start_ts = pd.to_datetime(start)
+                end_ts = pd.to_datetime(end) + (pd.Timedelta(hours=23, minutes=59) if " " not in end else pd.Timedelta(0))
+                df = df[(ts >= start_ts) & (ts <= end_ts)]
+            if not df.empty:
+                return df.tail(max_rows), "akshare_sina"
+        except Exception as e:
+            errors.append(f"akshare_sina:{e}")
     raise RuntimeError("minute fetch failed: " + " | ".join(errors))
 
 
@@ -316,7 +346,20 @@ def fetch_realtime_market() -> Tuple[pd.DataFrame, str]:
             if df is not None and not df.empty:
                 return df.copy(), "akshare"
         except Exception as e:
-            errors.append(f"akshare:{e}")
+            errors.append(f"akshare_em:{e}")
+        try:
+            df = ak.stock_zh_a_spot()
+            if df is not None and not df.empty:
+                return df.copy(), "akshare_sina"
+        except Exception as e:
+            errors.append(f"akshare_sina:{e}")
+        try:
+            if hasattr(ak, "stock_zh_a_spot_tx"):
+                df = ak.stock_zh_a_spot_tx()
+                if df is not None and not df.empty:
+                    return df.copy(), "akshare_tencent"
+        except Exception as e:
+            errors.append(f"akshare_tencent:{e}")
     try:
         df, source = fetch_realtime_market_tdx()
         if not df.empty:
@@ -334,13 +377,15 @@ def _spot_columns(df: pd.DataFrame) -> pd.DataFrame:
         "换手率": "turnover", "量比": "volume_ratio", "成交量": "volume",
         "成交额": "amount", "总市值": "market_cap", "流通市值": "float_market_cap",
         "动态市盈率": "pe", "市盈率-动态": "pe",
+        "trade": "price", "changepercent": "pct_change", "settlement": "pre_close",
+        "turnoverratio": "turnover", "mktcap": "market_cap", "nmc": "float_market_cap", "per": "pe",
     }
     out = df.rename(columns=rename).copy()
     for c in ["price", "pct_change", "high", "low", "open", "pre_close", "turnover", "volume_ratio", "volume", "amount", "market_cap", "float_market_cap", "pe"]:
         if c in out:
             out[c] = pd.to_numeric(out[c], errors="coerce")
     if "code" in out:
-        out["code"] = out["code"].astype(str).str.zfill(6)
+        out["code"] = out["code"].astype(str).str.lower().str.replace(r"^(sh|sz|bj)", "", regex=True).str.zfill(6)
     if "name" in out:
         out["name"] = out["name"].astype(str)
     return out
