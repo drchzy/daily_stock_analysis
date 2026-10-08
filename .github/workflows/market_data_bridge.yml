@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: market-data-bridge-\${{ github.ref }}
+  group: market-data-bridge-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          ref: \${{ github.ref_name }}
+          ref: ${{ github.ref_name }}
 
       - name: Setup Python
         uses: actions/setup-python@v6
